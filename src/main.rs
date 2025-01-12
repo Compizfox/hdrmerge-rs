@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufWriter;
-use std::ops::{AddAssign, Div};
+use std::ops::{AddAssign, Div, Mul};
 use rawler::dng::writer::DngWriter;
 use rawler::dng::{CropMode, DngCompression, DngPhotometricConversion, DNG_VERSION_V1_4};
 use rawler::{RawImage, RawImageData};
@@ -14,6 +14,9 @@ struct Args {
 	#[arg(required = true)]
 	input_files: Vec<String>,
 }
+
+
+const evs: [i32; 3] = [-2, 0, 2];
 
 fn main() {
 	let args: Args = Args::parse();
@@ -41,7 +44,6 @@ fn main() {
 
 		let mut result: Vec<f32> = vec![0f32; a[0].len()];
 
-		let evs: [i32; 3] = [-2, 0, 2];
 		(0..vec.len() / 4).into_iter().for_each(|block_i| {
 			let block = block_to_indices(width, block_i);
 			if !is_saturated(vec, block, wl) {
@@ -67,7 +69,7 @@ fn main() {
 		.into_par_iter()
 		.map(|i| {
 			// For each pixel, compute mean of non-zero pixels
-			non_zero_mean(results.iter().map(|col| col[i]))
+			non_zero_mean(results.iter().map(|col| col[i]), evs.map(|ev| 2f32.powi(ev)))
 		}).collect();
 
 	blended_rawimage.data = RawImageData::Float(blended);
@@ -129,18 +131,20 @@ mod tests {
 }
 
 /// Returns the arithmetic mean of non-zero elements
-fn non_zero_mean<I, T>(iterator: I) -> T
+fn non_zero_mean<I, J, T, W>(iterator: I, weights: J) -> T
 where
 	I: IntoIterator<Item=T>,
-	T: Zero + AddAssign + Div<Output=T> + From<u8>,
+	J: IntoIterator<Item=W>,
+	T: Zero + AddAssign + Mul<W, Output=T> + Div<W, Output=T>,
+	W: Zero + AddAssign + Copy,
 {
 	let mut sum = T::zero();
-	let mut count: u8 = 0;
-	for x in iterator {
-		if !x.is_zero() {
-			sum += x;
-			count += 1;
+	let mut count = W::zero();
+	for (value, weight) in iterator.into_iter().zip(weights) {
+		if !value.is_zero() {
+			sum += value * weight;
+			count += weight;
 		}
 	}
-	sum / T::from(count)
+	sum / count
 }
