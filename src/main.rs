@@ -1,12 +1,12 @@
+mod util;
+
 use std::fs::File;
 use std::io::BufWriter;
-use std::ops::{AddAssign, Div, Mul};
 use rawler::dng::writer::DngWriter;
 use rawler::dng::{CropMode, DngCompression, DngPhotometricConversion, DNG_VERSION_V1_4};
 use rawler::{RawImage, RawImageData};
 use clap::Parser;
 use rayon::prelude::*;
-use num_traits::Zero;
 
 #[derive(Parser)]
 struct Args {
@@ -15,6 +15,11 @@ struct Args {
 	input_files: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+struct Sample {
+	value: f32,
+	weight: f32,
+}
 
 const evs: [i32; 3] = [-2, 0, 2];
 
@@ -39,37 +44,39 @@ fn main() {
 		}
 	}).collect::<Vec<_>>();
 
-	let results: Vec<Vec<f32>> = a.par_iter().enumerate().map(|(image_i, vec)| {
+	let n_pixels = a[0].len();
+
+	let results: Vec<Vec<Sample>> = a.par_iter().enumerate().map(|(image_i, vec)| {
 		println!("Adding image {}/{}...", image_i + 1, rawimages.len());
 
-		let mut result: Vec<f32> = vec![0f32; a[0].len()];
+		let mut result: Vec<Sample> = vec![Sample { value: 0f32, weight: 0f32 }; n_pixels];
 
 		(0..vec.len() / 4).into_iter().for_each(|block_i| {
 			let block = block_to_indices(width, block_i);
-			if !is_saturated(vec, block, wl) {
-				block
-					.iter()
-					.for_each(|&i| {
-						let corrected_val = vec[i].saturating_sub(bl) as f32
-							/ 2f32.powi(evs[image_i]) + bl as f32;
+			let is_saturated = is_saturated(vec, block, wl);
+			let exp_factor = 2f32.powi(evs[image_i]);
 
-						result[i] = corrected_val;
-					})
-			}
+			block
+				.iter()
+				.for_each(|&i| {
+					result[i] = Sample {
+						value: vec[i].saturating_sub(bl) as f32 / exp_factor + bl as f32,
+						weight: if !is_saturated { exp_factor } else { 0f32 },
+					};
+				})
 		});
 		result
 	}).collect();
 
 	// Blend
 	println!("Blending...");
-	let n_pixels = results[0].len();
 
 	// Iterate over pixels
 	let blended = (0..n_pixels)
 		.into_par_iter()
 		.map(|i| {
 			// For each pixel, compute mean of non-zero pixels
-			non_zero_mean(results.iter().map(|col| col[i]), evs.map(|ev| 2f32.powi(ev)))
+			weighted_mean(results.iter().map(|col| col[i]))
 		}).collect();
 
 	blended_rawimage.data = RawImageData::Float(blended);
@@ -130,21 +137,14 @@ mod tests {
 	}
 }
 
-/// Returns the arithmetic mean of non-zero elements
-fn non_zero_mean<I, J, T, W>(iterator: I, weights: J) -> T
-where
-	I: IntoIterator<Item=T>,
-	J: IntoIterator<Item=W>,
-	T: Zero + AddAssign + Mul<W, Output=T> + Div<W, Output=T>,
-	W: Zero + AddAssign + Copy,
-{
-	let mut sum = T::zero();
-	let mut count = W::zero();
-	for (value, weight) in iterator.into_iter().zip(weights) {
-		if !value.is_zero() {
-			sum += value * weight;
-			count += weight;
-		}
+fn weighted_mean<I: IntoIterator<Item=Sample>>(xs: I) -> f32 {
+	let mut sum = 0.0;
+	let mut count = 0.0;
+
+	for sample in xs {
+		sum += sample.value * sample.weight;
+		count += sample.weight;
 	}
+
 	sum / count
 }
