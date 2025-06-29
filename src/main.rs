@@ -6,6 +6,8 @@ use rawler::dng::writer::DngWriter;
 use rawler::dng::{CropMode, DngCompression, DngPhotometricConversion, DNG_VERSION_V1_4};
 use rawler::{RawImage, RawImageData};
 use clap::Parser;
+use rawler::decoders::RawMetadata;
+use rawler::formats::tiff::SRational;
 use rayon::prelude::*;
 
 #[derive(Parser)]
@@ -21,14 +23,24 @@ struct Sample {
 	weight: f32,
 }
 
-const evs: [i32; 3] = [-2, 0, 2];
-
 fn main() {
 	let args: Args = Args::parse();
 
-	let rawimages: Vec<RawImage> = args.input_files.iter().map(|filename| {
-		rawler::decode_file(filename).unwrap()
-	}).collect();
+	let (rawimages, metadatas): (Vec<RawImage>, Vec<RawMetadata>) = args.input_files.iter().map(|filename| {
+		let rawfile = rawler::rawsource::RawSource::new(filename.as_ref()).unwrap();
+		let decoder = rawler::get_decoder(&rawfile).unwrap();
+		let raw_params = rawler::decoders::RawDecodeParams { image_index: 0 };
+		let rawimage = decoder.raw_image(&rawfile, &raw_params, false).unwrap();
+		let metadata = decoder.raw_metadata(&rawfile, &raw_params).unwrap();
+
+		(rawimage, metadata)
+	}).unzip();
+
+	// Get exposure values
+	let evs: Vec<SRational> = metadatas
+		.iter()
+		.map(|metadata| metadata.exif.exposure_bias.unwrap())
+		.collect();
 
 	// Blend images
 	let mut blended_rawimage = rawimages[0].clone();
@@ -54,7 +66,7 @@ fn main() {
 		(0..vec.len() / 4).into_iter().for_each(|block_i| {
 			let block = block_to_indices(width, block_i);
 			let is_saturated = is_saturated(vec, block, wl);
-			let exp_factor = 2f32.powi(evs[image_i]);
+			let exp_factor = 2f32.powf(evs[image_i].to_f32());
 
 			block
 				.iter()
@@ -147,4 +159,14 @@ fn weighted_mean<I: IntoIterator<Item=Sample>>(xs: I) -> f32 {
 	}
 
 	sum / count
+}
+
+trait SRationalTo {
+	fn to_f32(self) -> f32;
+}
+
+impl SRationalTo for SRational {
+	fn to_f32(self) -> f32 {
+		self.n as f32 / self.d as f32
+	}
 }
